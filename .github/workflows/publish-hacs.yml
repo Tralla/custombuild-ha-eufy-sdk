@@ -11,8 +11,8 @@ on:
         description: Ordered public HA patch commits, separated by whitespace (empty if none)
         required: false
         type: string
-      ha_candidate_sha:
-        description: Exact accepted HA candidate commit in Tralla/ha-eufy-sdk
+      ha_candidate_tree:
+        description: Exact accepted HA candidate Git tree ID
         required: true
         type: string
       release_tag:
@@ -35,7 +35,7 @@ jobs:
     env:
       HA_BASE_SHA: ${{ inputs.ha_base_sha }}
       HA_PATCH_SHAS: ${{ inputs.ha_patch_shas }}
-      HA_CANDIDATE_SHA: ${{ inputs.ha_candidate_sha }}
+      HA_CANDIDATE_TREE: ${{ inputs.ha_candidate_tree }}
       RELEASE_TAG: ${{ inputs.release_tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -55,7 +55,7 @@ jobs:
 
           base = os.environ['HA_BASE_SHA']
           patches = os.environ['HA_PATCH_SHAS'].split()
-          candidate = os.environ['HA_CANDIDATE_SHA']
+          candidate_tree = os.environ['HA_CANDIDATE_TREE']
           tag = os.environ['RELEASE_TAG']
           sha = re.compile(r'[0-9a-fA-F]{40}\Z')
           version = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?\Z')
@@ -63,8 +63,8 @@ jobs:
               raise SystemExit('ha_base_sha must be a full 40-digit commit SHA')
           if any(not sha.fullmatch(patch) for patch in patches):
               raise SystemExit('every ha_patch_shas entry must be a full 40-digit commit SHA')
-          if not sha.fullmatch(candidate):
-              raise SystemExit('ha_candidate_sha must be a full 40-digit commit SHA')
+          if not sha.fullmatch(candidate_tree):
+              raise SystemExit('ha_candidate_tree must be a full 40-digit Git tree ID')
           if not version.fullmatch(tag):
               raise SystemExit('release_tag must be a new vMAJOR.MINOR.PATCH version tag')
           pathlib.Path(os.environ['RUNNER_TEMP'], 'ha-patches.txt').write_text(
@@ -97,15 +97,6 @@ jobs:
             echo "HA base object is not a commit: $HA_BASE_SHA" >&2
             exit 1
           fi
-          if ! git -C "$source_dir" fetch --no-tags source "$HA_CANDIDATE_SHA"; then
-            echo "Could not fetch HA candidate commit from public source: $HA_CANDIDATE_SHA" >&2
-            exit 1
-          fi
-          if [[ "$(git -C "$source_dir" cat-file -t "$HA_CANDIDATE_SHA")" != commit ]]; then
-            echo "HA candidate object is not a commit: $HA_CANDIDATE_SHA" >&2
-            exit 1
-          fi
-          expected_tree="$(git -C "$source_dir" rev-parse "$HA_CANDIDATE_SHA^{tree}")"
           while IFS= read -r patch; do
             if ! git -C "$source_dir" fetch --no-tags source "$patch"; then
               echo "Could not fetch HA patch commit from public source: $patch" >&2
@@ -132,8 +123,8 @@ jobs:
             fi
           done < "$RUNNER_TEMP/ha-patches.txt"
           actual_tree="$(git -C "$source_dir" rev-parse 'HEAD^{tree}')"
-          if [[ "$actual_tree" != "$expected_tree" ]]; then
-            echo "Reconstructed HA tree mismatch: candidate $HA_CANDIDATE_SHA has tree $expected_tree, got $actual_tree" >&2
+          if [[ "$actual_tree" != "${HA_CANDIDATE_TREE,,}" ]]; then
+            echo "Reconstructed HA tree mismatch: expected $HA_CANDIDATE_TREE, got $actual_tree" >&2
             exit 1
           fi
 
@@ -233,7 +224,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit --allow-empty -m "release: $RELEASE_TAG" \
             -m "HA base: $HA_BASE_SHA" \
-            -m "HA candidate: $HA_CANDIDATE_SHA" \
+            -m "HA candidate tree: $HA_CANDIDATE_TREE" \
             -m "HA patches, in order: $(tr '\n' ' ' < "$RUNNER_TEMP/ha-patches.txt")"
           git tag -a "$RELEASE_TAG" -m "HACS distribution $RELEASE_TAG"
           git push --atomic origin HEAD:refs/heads/main "refs/tags/$RELEASE_TAG"
