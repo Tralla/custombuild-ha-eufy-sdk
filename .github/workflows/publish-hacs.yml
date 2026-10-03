@@ -156,7 +156,7 @@ jobs:
         run: |
           set -euo pipefail
           source_dir="$RUNNER_TEMP/ha-source"
-          for item in custom_components/eufy_sdk/manifest.json hacs.json README.md; do
+          for item in custom_components/eufy_sdk/manifest.json hacs.json; do
             if [[ ! -e "$source_dir/$item" ]]; then
               echo "Required HACS source material is missing: $item" >&2
               exit 1
@@ -171,11 +171,13 @@ jobs:
           git -C "$source_dir" diff --exit-code
           git -C "$source_dir" clean -fdx -- custom_components/eufy_sdk
           cp .github/workflows/publish-hacs.yml "$RUNNER_TEMP/publish-hacs.yml"
+          cp README.md "$RUNNER_TEMP/distribution-README.md"
           git rm -r -q --ignore-unmatch -- .
           mkdir -p .github/workflows custom_components
           cp "$RUNNER_TEMP/publish-hacs.yml" .github/workflows/publish-hacs.yml
+          cp "$RUNNER_TEMP/distribution-README.md" README.md
           cp -a "$source_dir/custom_components/eufy_sdk" custom_components/
-          cp "$source_dir/hacs.json" "$source_dir/README.md" .
+          cp "$source_dir/hacs.json" .
           cp "${licenses[@]}" .
           git add -A
 
