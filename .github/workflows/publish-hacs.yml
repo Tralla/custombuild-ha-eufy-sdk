@@ -1,0 +1,239 @@
+name: Publish HACS integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      ha_base_sha:
+        description: Exact public HA base commit in Tralla/ha-eufy-sdk
+        required: true
+        type: string
+      ha_patch_shas:
+        description: Ordered public HA patch commits, separated by whitespace (empty if none)
+        required: false
+        type: string
+      ha_candidate_sha:
+        description: Exact accepted HA candidate commit in Tralla/ha-eufy-sdk
+        required: true
+        type: string
+      release_tag:
+        description: New immutable version tag (vMAJOR.MINOR.PATCH with optional prerelease)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: publish-hacs
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'Tralla/custombuild-ha-eufy-sdk' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      HA_BASE_SHA: ${{ inputs.ha_base_sha }}
+      HA_PATCH_SHAS: ${{ inputs.ha_patch_shas }}
+      HA_CANDIDATE_SHA: ${{ inputs.ha_candidate_sha }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out distribution repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Validate immutable inputs and destination
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          base = os.environ['HA_BASE_SHA']
+          patches = os.environ['HA_PATCH_SHAS'].split()
+          candidate = os.environ['HA_CANDIDATE_SHA']
+          tag = os.environ['RELEASE_TAG']
+          sha = re.compile(r'[0-9a-fA-F]{40}\Z')
+          version = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?\Z')
+          if not sha.fullmatch(base):
+              raise SystemExit('ha_base_sha must be a full 40-digit commit SHA')
+          if any(not sha.fullmatch(patch) for patch in patches):
+              raise SystemExit('every ha_patch_shas entry must be a full 40-digit commit SHA')
+          if not sha.fullmatch(candidate):
+              raise SystemExit('ha_candidate_sha must be a full 40-digit commit SHA')
+          if not version.fullmatch(tag):
+              raise SystemExit('release_tag must be a new vMAJOR.MINOR.PATCH version tag')
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'ha-patches.txt').write_text(
+              ''.join(patch.lower() + '\n' for patch in patches), encoding='utf-8'
+          )
+          PY
+          if [[ "$(git remote get-url origin)" != "https://github.com/Tralla/custombuild-ha-eufy-sdk" &&
+                "$(git remote get-url origin)" != "https://github.com/Tralla/custombuild-ha-eufy-sdk.git" ]]; then
+            echo 'Refusing to publish outside the dedicated HACS distribution repository' >&2
+            exit 1
+          fi
+          existing_tag="$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")"
+          if [[ -n "$existing_tag" ]]; then
+            echo "Release tag already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Reconstruct exact public HA source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/ha-source"
+          git init -q "$source_dir"
+          git -C "$source_dir" remote add source https://github.com/Tralla/ha-eufy-sdk.git
+          if ! git -C "$source_dir" fetch --no-tags source "$HA_BASE_SHA"; then
+            echo "Could not fetch HA base commit from public source: $HA_BASE_SHA" >&2
+            exit 1
+          fi
+          if [[ "$(git -C "$source_dir" cat-file -t "$HA_BASE_SHA")" != commit ]]; then
+            echo "HA base object is not a commit: $HA_BASE_SHA" >&2
+            exit 1
+          fi
+          if ! git -C "$source_dir" fetch --no-tags source "$HA_CANDIDATE_SHA"; then
+            echo "Could not fetch HA candidate commit from public source: $HA_CANDIDATE_SHA" >&2
+            exit 1
+          fi
+          if [[ "$(git -C "$source_dir" cat-file -t "$HA_CANDIDATE_SHA")" != commit ]]; then
+            echo "HA candidate object is not a commit: $HA_CANDIDATE_SHA" >&2
+            exit 1
+          fi
+          expected_tree="$(git -C "$source_dir" rev-parse "$HA_CANDIDATE_SHA^{tree}")"
+          while IFS= read -r patch; do
+            if ! git -C "$source_dir" fetch --no-tags source "$patch"; then
+              echo "Could not fetch HA patch commit from public source: $patch" >&2
+              exit 1
+            fi
+            if [[ "$(git -C "$source_dir" cat-file -t "$patch")" != commit ]]; then
+              echo "HA patch object is not a commit: $patch" >&2
+              exit 1
+            fi
+            parents="$(git -C "$source_dir" rev-list --parents -n 1 "$patch")"
+            if [[ "$(wc -w <<< "$parents")" -gt 2 ]]; then
+              echo "Merge commit is not a replayable patch: $patch" >&2
+              exit 1
+            fi
+          done < "$RUNNER_TEMP/ha-patches.txt"
+          git -C "$source_dir" remote remove source
+          git -C "$source_dir" checkout --detach "$HA_BASE_SHA"
+          git -C "$source_dir" config user.name 'github-actions[bot]'
+          git -C "$source_dir" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          while IFS= read -r patch; do
+            if ! git -C "$source_dir" cherry-pick "$patch"; then
+              echo "HA patch replay failed: $patch" >&2
+              exit 1
+            fi
+          done < "$RUNNER_TEMP/ha-patches.txt"
+          actual_tree="$(git -C "$source_dir" rev-parse 'HEAD^{tree}')"
+          if [[ "$actual_tree" != "$expected_tree" ]]; then
+            echo "Reconstructed HA tree mismatch: candidate $HA_CANDIDATE_SHA has tree $expected_tree, got $actual_tree" >&2
+            exit 1
+          fi
+
+      - name: Validate reconstructed integration
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Run source validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/ha-source"
+          python -m pip install -r requirements_common.txt -r requirements_dev.txt -r requirements_lint.txt pytest
+          python -m pytest tests/ -q
+          python -m ruff check . --no-cache
+          python -m ruff format . --check --no-cache
+
+      - name: Export only public HACS distribution content
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/ha-source"
+          for item in custom_components/eufy_sdk/manifest.json hacs.json README.md; do
+            if [[ ! -e "$source_dir/$item" ]]; then
+              echo "Required HACS source material is missing: $item" >&2
+              exit 1
+            fi
+          done
+          shopt -s nullglob
+          licenses=("$source_dir"/LICENSE "$source_dir"/LICENSE.* "$source_dir"/LICENCE "$source_dir"/LICENCE.*)
+          if (( ${#licenses[@]} == 0 )); then
+            echo 'Source repository has no public LICENSE material' >&2
+            exit 1
+          fi
+          git -C "$source_dir" diff --exit-code
+          git -C "$source_dir" clean -fdx -- custom_components/eufy_sdk
+          cp .github/workflows/publish-hacs.yml "$RUNNER_TEMP/publish-hacs.yml"
+          git rm -r -q --ignore-unmatch -- .
+          mkdir -p .github/workflows custom_components
+          cp "$RUNNER_TEMP/publish-hacs.yml" .github/workflows/publish-hacs.yml
+          cp -a "$source_dir/custom_components/eufy_sdk" custom_components/
+          cp "$source_dir/hacs.json" "$source_dir/README.md" .
+          cp "${licenses[@]}" .
+          git add -A
+
+      - name: Validate HACS distribution structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path.cwd()
+          components = root / 'custom_components'
+          if not components.is_dir() or sorted(p.name for p in components.iterdir()) != ['eufy_sdk']:
+              raise SystemExit('distribution must contain only custom_components/eufy_sdk')
+          integration = components / 'eufy_sdk'
+          if not integration.is_dir():
+              raise SystemExit('eufy_sdk must be an integration directory')
+          for name in ('custom_components/eufy_sdk/manifest.json', 'hacs.json'):
+              path = root / name
+              if not path.is_file() or not isinstance(json.loads(path.read_text(encoding='utf-8')), dict):
+                  raise SystemExit(f'{name} must contain a JSON object')
+          if not (root / 'README.md').is_file():
+              raise SystemExit('public README.md is missing')
+          licenses = [p for p in root.iterdir() if p.is_file() and p.name.upper().startswith('LICENSE')]
+          licenses += [p for p in root.iterdir() if p.is_file() and p.name.upper().startswith('LICENCE')]
+          if not licenses:
+              raise SystemExit('public license material is missing')
+          workflow = root / '.github/workflows/publish-hacs.yml'
+          if not workflow.is_file():
+              raise SystemExit('distribution publication workflow is missing')
+          allowed = {'.git', '.github', 'custom_components', 'hacs.json', 'README.md'}
+          allowed.update(p.name for p in licenses)
+          if {p.name for p in root.iterdir()} != allowed:
+              raise SystemExit('distribution root contains missing or unrelated source paths')
+          if sorted(p.name for p in (root / '.github/workflows').iterdir()) != ['publish-hacs.yml']:
+              raise SystemExit('unrelated source workflows were copied')
+          forbidden = {'.git', '.github', '.pytest_cache', '.venv', '__pycache__', 'node_modules', 'test', 'tests', 'docs'}
+          if any(p.name == '.git' or (p.is_dir() and p.name in forbidden) for p in integration.rglob('*')):
+              raise SystemExit('source development, test, or Git directories were copied')
+          PY
+
+      - name: Commit and publish exact distribution state
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing_tag="$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")"
+          if [[ -n "$existing_tag" ]]; then
+            echo "Release tag appeared during this run: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --allow-empty -m "release: $RELEASE_TAG" \
+            -m "HA base: $HA_BASE_SHA" \
+            -m "HA candidate: $HA_CANDIDATE_SHA" \
+            -m "HA patches, in order: $(tr '\n' ' ' < "$RUNNER_TEMP/ha-patches.txt")"
+          git tag -a "$RELEASE_TAG" -m "HACS distribution $RELEASE_TAG"
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/$RELEASE_TAG"
+          gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" \
+            --notes "Reconstructed from immutable public HA source commits. See the tagged commit for the exact composition."
