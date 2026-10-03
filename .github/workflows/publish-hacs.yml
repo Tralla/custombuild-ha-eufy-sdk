@@ -153,10 +153,9 @@ jobs:
               exit 1
             fi
           done
-          shopt -s nullglob
-          licenses=("$source_dir"/LICENSE "$source_dir"/LICENSE.* "$source_dir"/LICENCE "$source_dir"/LICENCE.*)
-          if (( ${#licenses[@]} == 0 )); then
-            echo 'Source repository has no public LICENSE material' >&2
+          license_path="$source_dir/LICENSE"
+          if [[ ! -f "$license_path" ]]; then
+            echo "Required public license file is missing: $license_path" >&2
             exit 1
           fi
           git -C "$source_dir" diff --exit-code
@@ -169,7 +168,7 @@ jobs:
           cp "$RUNNER_TEMP/distribution-README.md" README.md
           cp -a "$source_dir/custom_components/eufy_sdk" custom_components/
           cp "$source_dir/hacs.json" .
-          cp "${licenses[@]}" .
+          cp "$license_path" LICENSE
           git add -A
 
       - name: Validate HACS distribution structure
@@ -193,15 +192,13 @@ jobs:
                   raise SystemExit(f'{name} must contain a JSON object')
           if not (root / 'README.md').is_file():
               raise SystemExit('public README.md is missing')
-          licenses = [p for p in root.iterdir() if p.is_file() and p.name.upper().startswith('LICENSE')]
-          licenses += [p for p in root.iterdir() if p.is_file() and p.name.upper().startswith('LICENCE')]
-          if not licenses:
-              raise SystemExit('public license material is missing')
+          if not (root / 'LICENSE').is_file():
+              raise SystemExit('public LICENSE is missing')
           workflow = root / '.github/workflows/publish-hacs.yml'
           if not workflow.is_file():
               raise SystemExit('distribution publication workflow is missing')
           allowed = {'.git', '.github', 'custom_components', 'hacs.json', 'README.md'}
-          allowed.update(p.name for p in licenses)
+          allowed.add('LICENSE')
           if {p.name for p in root.iterdir()} != allowed:
               raise SystemExit('distribution root contains missing or unrelated source paths')
           if sorted(p.name for p in (root / '.github/workflows').iterdir()) != ['publish-hacs.yml']:
