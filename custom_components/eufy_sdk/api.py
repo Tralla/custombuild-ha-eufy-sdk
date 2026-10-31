@@ -76,6 +76,9 @@ class EufySdkApiClient:
         self._reconnect_task: asyncio.Task | None = None
         self._connect_lock = asyncio.Lock()
         self._closing = False
+        # The bridge's stable install id (`bridgeId`, from auth.status): the same
+        # whatever address it is reached at. None until known, or on an older bridge.
+        self.bridge_id: str | None = None
         self._next_id = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._property_cache: dict[str, tuple[tuple | None, dict[str, Any]]] = {}
@@ -233,7 +236,11 @@ class EufySdkApiClient:
     # ── auth (mirrors the bridge's auth.* protocol) ──
     async def auth_status(self) -> dict[str, Any]:
         """Return the current auth state (ok|require_2fa|require_captcha|pending)."""
-        return (await self.rpc("auth.status"))["auth"]
+        reply = await self.rpc("auth.status")
+        bridge_id = reply.get("bridgeId")
+        if isinstance(bridge_id, str) and bridge_id:
+            self.bridge_id = bridge_id
+        return reply["auth"]
 
     async def submit_2fa(self, code: str) -> dict[str, Any]:
         """Submit a 2FA code; returns the new auth state."""

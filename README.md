@@ -22,7 +22,7 @@ instead. In particular, do not add the upstream add-on repository: its add-on ha
 **eufy-sdk bridge**, but runs the upstream Bridge image rather than this build's.
 
 You can recognise the custom-build add-on by its version, which contains `custom` (for example
-`<version>-custom.<date>.<n>`), and by the repository it was installed from. The `custom` marker
+`<version>-custom.<date><nn>`), and by the repository it was installed from. The `custom` marker
 appears in the HACS release tag and in the add-on version; Home Assistant's integration information
 shows the plain manifest version, without `custom`. Install the integration and add-on from
 releases with the same date stamp, normally the latest of each.
